@@ -46,6 +46,10 @@ public:
   std::vector<std::string> enumerate() const;
   std::tuple<std::string_view, SSVM::Configure, std::string>
   resolve(std::string_view Params) const;
+  bool compare(const std::vector<std::pair<std::string, std::string>> &Expected,
+               const std::vector<ValVariant> &Got) const;
+  bool stringContains(const std::string &Expected,
+                      const std::string &Got) const;
 
   void run(std::string_view Proposal, std::string_view UnitName);
 
@@ -67,16 +71,6 @@ public:
   using GetCallback = Expect<std::vector<ValVariant>>(
       const std::string &ModName, const std::string &Field);
   std::function<GetCallback> onGet;
-
-  /// Helper function to compare return values with expected values.
-  using CompareCallback =
-      bool(const std::vector<std::pair<std::string, std::string>> &Expected,
-           const std::vector<ValVariant> &Got);
-  std::function<CompareCallback> onCompare;
-
-  using StringContainsCallback = bool(const std::string &Expected,
-                                      const std::string &Got);
-  std::function<StringContainsCallback> onStringContains;
 
 private:
   std::filesystem::path TestsuiteRoot;

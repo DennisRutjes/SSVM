@@ -21,6 +21,8 @@
 #define RAPIDJSON_NEON 1
 #endif
 
+#include <cmath>
+
 #include "common/log.h"
 
 #include "spectest.h"
@@ -226,6 +228,178 @@ SpecTest::resolve(std::string_view Params) const {
       Proposal.Path, Proposal.Conf, Params.substr(Pos + 1)};
 }
 
+bool SpecTest::compare(
+    const std::vector<std::pair<std::string, std::string>> &Expected,
+    const std::vector<ValVariant> &Got) const {
+  if (Expected.size() != Got.size()) {
+    return false;
+  }
+  for (size_t I = 0; I < Expected.size(); ++I) {
+    const auto &[Type, E] = Expected[I];
+    const auto &G = Got[I];
+    if (E.substr(0, 4) == "nan:"sv) {
+      /// Handle NaN case
+      /// TODO: nan:canonical and nan:arithmetic
+      if (Type == "f32"sv) {
+        const float F = std::get<float>(G);
+        if (!std::isnan(F)) {
+          return false;
+        }
+      } else if (Type == "f64"sv) {
+        const double D = std::get<double>(G);
+        if (!std::isnan(D)) {
+          return false;
+        }
+      }
+    } else if (Type == "funcref"sv) {
+      /// Handle reference value case
+      if (E == "null"sv) {
+        return SSVM::isNullRef(G);
+      } else {
+        if (SSVM::isNullRef(G)) {
+          return false;
+        }
+        uint32_t V1 = SSVM::retrieveFuncIdx(G);
+        uint32_t V2 = static_cast<uint32_t>(std::stoul(E));
+        if (V1 != V2) {
+          return false;
+        }
+      }
+    } else if (Type == "externref"sv) {
+      /// Handle reference value case
+      if (E == "null"sv) {
+        return SSVM::isNullRef(G);
+      } else {
+        if (SSVM::isNullRef(G)) {
+          return false;
+        }
+        /// The added 0x1 uint32_t prefix in externref index case will be
+        /// discarded
+        uint32_t V1 = static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&SSVM::retrieveExternRef<uint32_t>(G)));
+        uint32_t V2 = static_cast<uint32_t>(std::stoul(E));
+        if (V1 != V2) {
+          return false;
+        }
+      }
+    } else if (Type == "i32"sv || Type == "f32"sv) {
+      const uint32_t V1 = uint32_t(std::stoul(E));
+      const uint32_t V2 = std::get<uint32_t>(G);
+      if (V1 != V2) {
+        return false;
+      }
+    } else if (Type == "i64"sv || Type == "f64"sv) {
+      const uint64_t V2 = uint64_t(std::stoull(E));
+      const uint64_t V1 = std::get<uint64_t>(G);
+      if (V1 != V2) {
+        return false;
+      }
+    } else if (std::string_view(Type).substr(0, 4) == "v128"sv) {
+      std::vector<std::string_view> Parts;
+      std::string_view Ev = E;
+      for (std::string::size_type Begin = 0, End = Ev.find(' ');
+           Begin != std::string::npos;
+           Begin = 1 + End, End = Ev.find(' ', Begin)) {
+        Parts.push_back(Ev.substr(Begin, End - Begin));
+        if (End == std::string::npos) {
+          break;
+        }
+      }
+      std::string_view LaneType = std::string_view(Type).substr(4);
+      if (LaneType == "f32") {
+        using floatx4_t [[gnu::vector_size(16)]] = float;
+        using uint32x4_t [[gnu::vector_size(16)]] = uint32_t;
+        const auto VF = reinterpret_cast<floatx4_t>(std::get<uint128_t>(G));
+        const auto VI = reinterpret_cast<uint32x4_t>(std::get<uint128_t>(G));
+        for (size_t I = 0; I < 4; ++I) {
+          if (Parts[I].substr(0, 4) == "nan:"sv) {
+            if (!std::isnan(VF[I])) {
+              return false;
+            }
+          } else {
+            const uint32_t V2 = std::stoull(std::string(Parts[I]));
+            const uint32_t V1 = VI[I];
+            if (V1 != V2) {
+              return false;
+            }
+          }
+        }
+      } else if (LaneType == "f64") {
+        using doublex2_t [[gnu::vector_size(16)]] = double;
+        using uint64x2_t [[gnu::vector_size(16)]] = uint64_t;
+        const auto VF = reinterpret_cast<doublex2_t>(std::get<uint128_t>(G));
+        const auto VI = reinterpret_cast<uint64x2_t>(std::get<uint128_t>(G));
+        for (size_t I = 0; I < 2; ++I) {
+          if (Parts[I].substr(0, 4) == "nan:"sv) {
+            if (!std::isnan(VF[I])) {
+              return false;
+            }
+          } else {
+            const uint64_t V2 = std::stoull(std::string(Parts[I]));
+            const uint64_t V1 = VI[I];
+            if (V1 != V2) {
+              return false;
+            }
+          }
+        }
+      } else if (LaneType == "i8") {
+        using uint8x16_t [[gnu::vector_size(16)]] = uint8_t;
+        const auto V = reinterpret_cast<uint8x16_t>(std::get<uint128_t>(G));
+        for (size_t I = 0; I < 16; ++I) {
+          const uint8_t V2 = std::stoul(std::string(Parts[I]));
+          const uint8_t V1 = V[I];
+          if (V1 != V2) {
+            return false;
+          }
+        }
+      } else if (LaneType == "i16") {
+        using uint16x8_t [[gnu::vector_size(16)]] = uint16_t;
+        const auto V = reinterpret_cast<uint16x8_t>(std::get<uint128_t>(G));
+        for (size_t I = 0; I < 8; ++I) {
+          const uint16_t V2 = std::stoul(std::string(Parts[I]));
+          const uint16_t V1 = V[I];
+          if (V1 != V2) {
+            return false;
+          }
+        }
+      } else if (LaneType == "i32") {
+        using uint32x4_t [[gnu::vector_size(16)]] = uint32_t;
+        const auto V = reinterpret_cast<uint32x4_t>(std::get<uint128_t>(G));
+        for (size_t I = 0; I < 4; ++I) {
+          const uint32_t V2 = std::stoul(std::string(Parts[I]));
+          const uint32_t V1 = V[I];
+          if (V1 != V2) {
+            return false;
+          }
+        }
+      } else if (LaneType == "i64") {
+        using uint64x2_t [[gnu::vector_size(16)]] = uint64_t;
+        const auto V = reinterpret_cast<uint64x2_t>(std::get<uint128_t>(G));
+        for (size_t I = 0; I < 2; ++I) {
+          const uint64_t V2 = std::stoul(std::string(Parts[I]));
+          const uint64_t V1 = V[I];
+          if (V1 != V2) {
+            return false;
+          }
+        }
+      }
+    } else {
+      assert(false);
+    }
+  }
+  return true;
+}
+
+bool SpecTest::stringContains(const std::string &Expected,
+                              const std::string &Got) const {
+  if (Expected.rfind(Got, 0) != 0) {
+    std::cout << "   ##### expected text : " << Expected << '\n';
+    std::cout << "   ######## error text : " << Got << '\n';
+    return false;
+  }
+  return true;
+}
+
 void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
   LOG(INFO) << Proposal << ' ' << UnitName;
   std::ifstream JSONIS(TestsuiteRoot / Proposal / UnitName /
@@ -264,7 +438,7 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
     /// Manager. Anonymous modules are instantiated in VM.
     if (auto Res = onInvoke(ModName, Field, Params)) {
       /// Check value.
-      if (onCompare(Returns, *Res)) {
+      if (compare(Returns, *Res)) {
         EXPECT_TRUE(true);
       } else {
         EXPECT_TRUE(false);
@@ -282,7 +456,7 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
 
     if (auto Res = onGet(ModName, Field)) {
       /// Check value.
-      EXPECT_TRUE(onCompare(Returns, *Res));
+      EXPECT_TRUE(compare(Returns, *Res));
     } else {
       EXPECT_TRUE(false);
     }
@@ -297,7 +471,7 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
       EXPECT_TRUE(false);
     } else {
       /// Check value.
-      EXPECT_TRUE(onStringContains(Text, SSVM::ErrCodeStr[Res.error()]));
+      EXPECT_TRUE(stringContains(Text, SSVM::ErrCodeStr[Res.error()]));
     }
   };
   auto TrapValidate = [&](const std::string &Filename,
@@ -305,7 +479,7 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
     if (auto Res = onValidate(Filename); Res) {
       EXPECT_TRUE(false);
     } else {
-      EXPECT_TRUE(onStringContains(Text, SSVM::ErrCodeStr[Res.error()]));
+      EXPECT_TRUE(stringContains(Text, SSVM::ErrCodeStr[Res.error()]));
     }
   };
   auto TrapInstantiate = [&](const std::string &Filename,
@@ -313,7 +487,7 @@ void SpecTest::run(std::string_view Proposal, std::string_view UnitName) {
     if (auto Res = onInstantiate(Filename); Res) {
       EXPECT_TRUE(false);
     } else {
-      EXPECT_TRUE(onStringContains(Text, SSVM::ErrCodeStr[Res.error()]));
+      EXPECT_TRUE(stringContains(Text, SSVM::ErrCodeStr[Res.error()]));
     }
   };
 
